@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Walkie-Talkie Online</title>
+
+  <!-- Carga la librería cliente de Socket.IO -->
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+      background-color: #1e1e2e;
+      color: #ffffff;
+    }
+
+    .container {
+      text-align: center;
+      background: #2b2b3d;
+      padding: 2rem;
+      border-radius: 16px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    }
+
+    #enter-btn {
+      padding: 12px 24px;
+      font-size: 1rem;
+      font-weight: bold;
+      border: none;
+      border-radius: 8px;
+      background-color: #3498db;
+      color: white;
+      cursor: pointer;
+    }
+
+    #talk-btn {
+      width: 180px;
+      height: 180px;
+      border-radius: 50%;
+      border: none;
+      background-color: #e74c3c;
+      color: white;
+      font-size: 1.1rem;
+      font-weight: bold;
+      cursor: pointer;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;
+      transition: transform 0.1s, background-color 0.2s;
+      box-shadow: 0 6px 12px rgba(231, 76, 60, 0.4);
+    }
+
+    #talk-btn:disabled {
+      background-color: #555;
+      box-shadow: none;
+      cursor: not-allowed;
+    }
+
+    #talk-btn.recording {
+      background-color: #2ecc71;
+      transform: scale(0.95);
+      box-shadow: 0 3px 6px rgba(46, 204, 113, 0.4);
+    }
+
+    #status {
+      margin-top: 1.5rem;
+      font-size: 1rem;
+      color: #a6adc8;
+    }
+
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <h1>Walkie-Talkie</h1>
+
+    <!-- Nombre del usuario -->
+    <div style="margin-bottom: 1rem;">
+      <label for="username-input">Tu Nombre / Nickname:</label>
+      <input type="text" id="username-input" value="Usuario_1" style="padding: 6px; border-radius: 6px; border: 1px solid #444;">
+    </div>
+
+    <!-- Selector de canales -->
+    <label for="room-select" style="display:block; margin-bottom: 1rem;">Canal:</label>
+    <select id="room-select" style="padding: 8px 16px; font-size: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
+      <option value="canal_1">Canal 1 - General</option>
+      <option value="canal_2">Canal 2 - Privado A</option>
+    </select>
+
+    <!-- Indicador de transmisión entrante -->
+    <div id="speaker-indicator" style="margin-bottom: 1rem; font-weight: bold; color: #f1c40f; min-height: 1.4em;"></div>
+
+    <!-- Botón para activar audio y micrófono (requiere un gesto del usuario) -->
+    <button id="enter-btn">Activar audio y micrófono</button>
+
+    <button id="talk-btn" class="hidden" disabled>Mantén presionado para hablar</button>
+    <p id="status">Conectando...</p>
+  </div>
+
+  <script>
+    const socket = io();
+    const enterBtn = document.getElementById('enter-btn');
+    const talkBtn = document.getElementById('talk-btn');
+    const statusText = document.getElementById('status');
+    const usernameInput = document.getElementById('username-input');
+    const roomSelect = document.getElementById('room-select');
+    const speakerIndicator = document.getElementById('speaker-indicator');
+
+    const SEGMENT_MS = 500; // duración de cada segmento de audio
+
+    let audioStream = null;
+    let currentRoom = roomSelect.value;
+    let talking = false;
+    let currentRec = null;
+
+    function readyText() {
+      return `Conectado al ${currentRoom}. Mantén presionado para hablar.`;
+    }
+
+    // 1. Gestión de Salas y Conexión
+    socket.on('connect', () => {
+      statusText.textContent = audioStream
+        ? readyText()
+        : 'Conectado. Activa el audio y el micrófono para empezar.';
+      socket.emit('join', { room: currentRoom });
+    });
+
+    socket.on('disconnect', () => {
+      statusText.textContent = 'Desconectado del servidor.';
+      stopTalking();
+    });
+
+    roomSelect.addEventListener('change', (e) => {
+      stopTalking();
+      const newRoom = e.target.value;
+      socket.emit('leave', { room: currentRoom });
+      socket.emit('join', { room: newRoom });
+      currentRoom = newRoom;
+      // Limpiar audio pendiente del canal anterior
+      queue.length = 0;
+      speakerIndicator.textContent = '';
+      statusText.textContent = `Cambiaste al ${currentRoom}.`;
+    });
+
+    // 2. Activar audio + micrófono (todo dentro de un clic del usuario)
+    enterBtn.addEventListener('click', async () => {
+      try {
+        // Desbloquea la reproducción de audio en el navegador
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) {
+          const ctx = new AudioCtx();
+          if (ctx.state === 'suspended') await ctx.resume();
+        }
+
+        audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+        enterBtn.classList.add('hidden');
+        talkBtn.classList.remove('hidden');
+        talkBtn.disabled = false;
+        statusText.textContent = socket.connected ? readyText() : 'Conectando...';
+      } catch (err) {
+        statusText.textContent = 'Error: Debes permitir el acceso al micrófono (y usar HTTPS o localhost).';
+        console.error('Error al acceder al micrófono:', err);
+      }
+    });
+
+    // 3. Grabación en segmentos completos (cada uno es un archivo reproducible)
+    function recordSegment() {
+      if (!talking || !audioStream) return;
+
+      const rec = new MediaRecorder(audioStream);
+      currentRec = rec;
+
+      rec.ondataavailable = (e) => {
+        if (e.data.size > 0 && socket.connected) {
+          socket.emit('audio_stream', {
+            room: currentRoom,
+            username: usernameInput.value || 'Anónimo',
+            audio: e.data,
+            mime: rec.mimeType // webm en Chrome/Firefox, mp4 en Safari
+          });
+        }
+      };
+
+      // Al terminar un segmento, si sigue presionado, empieza el siguiente
+      rec.onstop = () => {
+        if (talking) recordSegment();
+      };
+
+      rec.start();
+      setTimeout(() => {
+        if (rec.state === 'recording') rec.stop();
+      }, SEGMENT_MS);
+    }
+
+    function startTalking(e) {
+      if (e) e.preventDefault();
+      if (talking || !audioStream || !socket.connected) return;
+      talking = true;
+      talkBtn.classList.add('recording');
+      talkBtn.textContent = 'Hablando...';
+      statusText.textContent = 'Transmitiendo voz...';
+      recordSegment();
+    }
+
+    function stopTalking(e) {
+      if (e) e.preventDefault();
+      if (!talking) return;
+      talking = false;
+      // Detener ya el segmento en curso (envía lo que se grabó hasta ahora)
+      if (currentRec && currentRec.state === 'recording') currentRec.stop();
+      talkBtn.classList.remove('recording');
+      talkBtn.textContent = 'Mantén presionado para hablar';
+      statusText.textContent = readyText();
+    }
+
+    // Pointer events: cubren mouse, táctil y lápiz sin duplicar eventos
+    talkBtn.addEventListener('pointerdown', startTalking);
+    talkBtn.addEventListener('pointerup', stopTalking);
+    talkBtn.addEventListener('pointercancel', stopTalking);
+    talkBtn.addEventListener('pointerleave', stopTalking);
+    talkBtn.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    // 4. Recepción: cola de reproducción para que los segmentos suenen en orden
+    const queue = [];
+    let playing = false;
+    let indicatorTimer;
+
+    function playNext() {
+      if (playing) return;
+      const item = queue.shift();
+      if (!item) {
+        // Cola vacía: quitar el indicador poco después
+        clearTimeout(indicatorTimer);
+        indicatorTimer = setTimeout(() => {
+          speakerIndicator.textContent = '';
+        }, 400);
+        return;
+      }
+
+      clearTimeout(indicatorTimer);
+      speakerIndicator.textContent = `🎙 ${item.username} está transmitiendo...`;
+
+      playing = true;
+      const url = URL.createObjectURL(item.blob);
+      const audio = new Audio(url);
+
+      const done = () => {
+        URL.revokeObjectURL(url);
+        playing = false;
+        playNext();
+      };
+      audio.onended = done;
+      audio.onerror = done;
+      audio.play().catch((err) => {
+        console.error('Error de reproducción:', err);
+        done();
+      });
+    }
+
+    socket.on('audio_stream', (data) => {
+      queue.push({
+        username: data.username,
+        blob: new Blob([data.audio], { type: data.mime || 'audio/webm' })
+      });
+      playNext();
+    });
+  </script>
+</body>
+</html>
