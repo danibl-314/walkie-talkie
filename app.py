@@ -25,12 +25,12 @@ def handle_audio_stream(data):
     room = data.get('room')
     username = data.get('username', 'Anónimo')
     audio_data = data.get('audio')
-    mime_type = data.get('mime', 'audio/webm')  # <--- Leemos el mime que envió el cliente
+    mime_type = data.get('mime', 'audio/webm')  
     
     emit('audio_stream', {
         'username': username,
         'audio': audio_data,
-        'mime': mime_type                       # <--- Lo enviamos a la sala
+        'mime': mime_type                      
     }, to=room, include_self=False)
 if __name__ == '__main__':
     socketio.run(app, debug=True, port=5000)
